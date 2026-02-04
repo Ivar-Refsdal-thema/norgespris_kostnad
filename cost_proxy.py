@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-from operator import ge
 import os
 from dataclasses import dataclass
 from datetime import date
 from urllib.parse import urlencode
 
-from arrow import get
 import pandas as pd
 import requests
 from entsoe import EntsoePandasClient
 
+import os
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
-# Optional for local dev only
+# Optional: local dev only
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -22,13 +22,21 @@ except Exception:
 
 
 def get_secret(name: str) -> str:
-    # Prefer Streamlit secrets in cloud
-    if name in st.secrets:
-        return st.secrets[name]
-    # Fall back to environment variables (incl. .env locally)
+    # 1) Try Streamlit secrets (Cloud or local secrets.toml)
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except StreamlitSecretNotFoundError:
+        # No secrets.toml / secrets configured locally
+        pass
+
+    # 2) Fallback to env vars (incl. .env via dotenv)
     val = os.getenv(name)
     if not val:
-        raise RuntimeError(f"Missing secret: {name}")
+        raise RuntimeError(
+            f"Missing secret '{name}'. "
+            f"Set it in Streamlit Secrets (Cloud) or as an environment variable/.env (local)."
+        )
     return val
 
 
