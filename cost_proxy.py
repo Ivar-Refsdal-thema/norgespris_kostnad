@@ -321,7 +321,6 @@ def build_cost_proxy(inputs: Inputs) -> pd.DataFrame:
     
     # 1) Elhub: forbruk per time (via Energy Data API) - household + cabin
     cons = fetch_elhub_consumption(inputs.start, inputs.end)
-
     if cons.empty:
         return pd.DataFrame(columns=[
             "start_time", "price_area", "cons_group", "volume_kwh", "date", "spot_eur_mwh", "eur_to_nok", "spot_nok_kwh",
@@ -376,12 +375,15 @@ def build_cost_proxy(inputs: Inputs) -> pd.DataFrame:
     df["vol_rest_kwh"] = df["volume_kwh"] * (1.0 - df["share_np"])
 
     # 6) Prisregler
-    # Norgespris: capped at 40 EUR/MWh (0.46 NOK/kWh) - cap is also in NOK using daily rates
+    # Norgespris: capped at 40 øre/kWg 
     norgespris_cap_nok_per_kwh = (NORGESPRIS_CAP_EUR_PER_MWH / 1000.0) * df["eur_to_nok"]
     df["price_np_nok_kwh"] = df["spot_nok_kwh"].clip(upper=norgespris_cap_nok_per_kwh)
 
-    # Strømstøtte: 90% over 0.77 NOK/kWh
+    # Strømstøtte: 90% over 77 øre/kWh - ONLY for household consumption group
     df["support_nok_kwh"] = SUPPORT_RATE * (df["spot_nok_kwh"] - SUPPORT_THRESHOLD_NOK_PER_KWH).clip(lower=0.0)
+    # Support only applies to household - set to 0 for other consumption groups
+    df.loc[df["cons_group"] != "household", "support_nok_kwh"] = 0.0
+    
     df["price_rest_nok_kwh"] = df["spot_nok_kwh"] - df["support_nok_kwh"]
 
     # 7) Kost for kunder
