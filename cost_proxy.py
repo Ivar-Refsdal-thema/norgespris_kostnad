@@ -11,7 +11,6 @@ from entsoe import EntsoePandasClient
 
 import os
 import streamlit as st
-from streamlit.errors import StreamlitSecretNotFoundError
 
 # Optional: local dev only
 try:
@@ -24,9 +23,9 @@ except Exception:
 def get_secret(name: str) -> str:
     # 1) Try Streamlit secrets (Cloud or local secrets.toml)
     try:
-        if name in st.secrets:
+        if hasattr(st, 'secrets') and name in st.secrets:
             return st.secrets[name]
-    except StreamlitSecretNotFoundError:
+    except (KeyError, AttributeError, Exception):
         # No secrets.toml / secrets configured locally
         pass
 
@@ -40,12 +39,9 @@ def get_secret(name: str) -> str:
     return val
 
 
-# -----------------------------
-# Konfig
-# -----------------------------
-EUR_TO_NOK = 11.5
+# Placeholder for the initial EUR_TO_NOK (will be fetched dynamically)
+EUR_TO_NOK = 11.5  # Fallback value if API fails
 NORGESPRIS_CAP_EUR_PER_MWH = 400.0 / EUR_TO_NOK  # ~34.78 EUR/MWh to get 40 øre/kWh
-NORGESPRIS_CAP_NOK_PER_KWH = (NORGESPRIS_CAP_EUR_PER_MWH / 1000.0) * EUR_TO_NOK  # 0.40 NOK/kWh (40 øre/kWh)
 SUPPORT_THRESHOLD_NOK_PER_KWH = 0.77
 SUPPORT_RATE = 0.90
 VAT_RATE = 0.25  # 25% MVA
@@ -66,6 +62,80 @@ ENTSOE_ZONE_MAP = {
     "NO4": "NO_4",
     "NO5": "NO_5",
 }
+
+
+# Cache for exchange rates to avoid repeated API calls
+_eur_nok_cache: dict[str, float] = {}
+
+
+def fetch_eur_nok_rates(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """
+    Fetch daily EUR/NOK exchange rates from Norges Bank API for the entire date range.
+    Returns DataFrame with columns: date, eur_to_nok
+    Falls back to EUR_TO_NOK constant if API fails.
+    """
+    rows = []
+    start_date = start.date() if hasattr(start, 'date') else pd.Timestamp(start).date()
+    end_date = end.date() if hasattr(end, 'date') else pd.Timestamp(end).date()
+    
+    start_str = start_date.isoformat()
+    end_str = end_date.isoformat()
+    
+    try:
+        # Norges Bank API: fetch entire range at once
+        url = f"https://data.norges-bank.no/api/data/EXR/B.EUR.NOK.SP?format=sdmx-json&startPeriod={start_str}&endPeriod={end_str}&locale=no"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "data" in data and "dataSets" in data["data"] and len(data["data"]["dataSets"]) > 0:
+            dataset = data["data"]["dataSets"][0]
+            
+            # Extract time periods from structure
+            time_periods = []
+            if "structure" in data["data"]:
+                structure = data["data"]["structure"]
+                if "dimensions" in structure and "observation" in structure["dimensions"]:
+                    obs_dim = structure["dimensions"]["observation"]
+                    if len(obs_dim) > 0 and "values" in obs_dim[0]:
+                        for val in obs_dim[0]["values"]:
+                            time_periods.append(val["id"])
+            
+            # Extract observations from series
+            if "series" in dataset:
+                for series_key, series_data in dataset["series"].items():
+                    if "observations" in series_data:
+                        observations = series_data["observations"]
+                        # observations is a dict where keys are indices and values are lists like ['11.771']
+                        for obs_idx_str, obs_value_list in observations.items():
+                            try:
+                                obs_idx = int(obs_idx_str)
+                                if obs_idx < len(time_periods):
+                                    date_str = time_periods[obs_idx]
+                                    rate = float(obs_value_list[0])
+                                    _eur_nok_cache[date_str] = rate
+                                    rows.append({
+                                        "date": pd.Timestamp(date_str).date(),
+                                        "eur_to_nok": rate
+                                    })
+                            except (ValueError, IndexError, TypeError):
+                                continue
+        
+        if rows:
+            return pd.DataFrame(rows).drop_duplicates(subset=["date"]).sort_values("date")
+    
+    except Exception as e:
+        print(f"Warning: Failed to fetch EUR/NOK rates from Norges Bank: {e}")
+    print("Falling back to constant EUR_TO_NOK rate for missing dates.")
+    # Fallback: fill in all dates with constant rate
+    current_date = start_date
+    while current_date <= end_date:
+        date_str = current_date.isoformat()
+        _eur_nok_cache[date_str] = EUR_TO_NOK
+        rows.append({"date": current_date, "eur_to_nok": EUR_TO_NOK})
+        current_date += pd.Timedelta(days=1)
+    
+    return pd.DataFrame(rows)
 
 
 @dataclass(frozen=True)
@@ -234,20 +304,27 @@ def fetch_spot_prices(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     return df[["start_time", "price_area", "spot_eur_mwh"]]
 
 
-def eur_mwh_to_nok_kwh(price_eur_per_mwh: pd.Series) -> pd.Series:
-    return (price_eur_per_mwh / 1000.0) * EUR_TO_NOK
+def eur_mwh_to_nok_kwh(price_eur_per_mwh: pd.Series, eur_to_nok_rate: float | pd.Series) -> pd.Series:
+    """
+    Convert EUR/MWh to NOK/kWh using exchange rate(s).
+    eur_to_nok_rate can be a scalar or a Series aligned with price_eur_per_mwh.
+    """
+    return (price_eur_per_mwh / 1000.0) * eur_to_nok_rate
 
 
 # -----------------------------
 # Core: bygg timesdatasett med kost
 # -----------------------------
 def build_cost_proxy(inputs: Inputs) -> pd.DataFrame:
+    # 0) Fetch daily EUR/NOK exchange rates
+    fx_rates = fetch_eur_nok_rates(inputs.start, inputs.end)
+    
     # 1) Elhub: forbruk per time (via Energy Data API) - household + cabin
     cons = fetch_elhub_consumption(inputs.start, inputs.end)
 
     if cons.empty:
         return pd.DataFrame(columns=[
-            "start_time", "price_area", "cons_group", "volume_kwh", "date", "spot_eur_mwh", "spot_nok_kwh",
+            "start_time", "price_area", "cons_group", "volume_kwh", "date", "spot_eur_mwh", "eur_to_nok", "spot_nok_kwh",
             "share_np", "norgespris_count", "total_count", "vol_np_kwh", "vol_rest_kwh",
             "price_np_nok_kwh", "support_nok_kwh", "price_rest_nok_kwh",
             "cost_np_nok", "cost_rest_nok", "support_nok",
@@ -262,7 +339,7 @@ def build_cost_proxy(inputs: Inputs) -> pd.DataFrame:
 
     if cons.empty:
         return pd.DataFrame(columns=[
-            "start_time", "price_area", "cons_group", "volume_kwh", "date", "spot_eur_mwh", "spot_nok_kwh",
+            "start_time", "price_area", "cons_group", "volume_kwh", "date", "spot_eur_mwh", "eur_to_nok", "spot_nok_kwh",
             "share_np", "norgespris_count", "total_count", "vol_np_kwh", "vol_rest_kwh",
             "price_np_nok_kwh", "support_nok_kwh", "price_rest_nok_kwh",
             "cost_np_nok", "cost_rest_nok", "support_nok",
@@ -274,7 +351,6 @@ def build_cost_proxy(inputs: Inputs) -> pd.DataFrame:
 
     # 3) Spotpriser per område
     spot = fetch_spot_prices(inputs.start, inputs.end)
-    spot["spot_nok_kwh"] = eur_mwh_to_nok_kwh(spot["spot_eur_mwh"])
 
     # 4) Slå sammen: timeforbruk + spot + norgespris-andel (per dag/cons_group)
     cons["date"] = cons["start_time"].dt.date
@@ -284,17 +360,25 @@ def build_cost_proxy(inputs: Inputs) -> pd.DataFrame:
         on=["date", "price_area", "cons_group"],
         how="left"
     )
+    # Merge exchange rates by date
+    df = df.merge(fx_rates, on="date", how="left")
+    
     df["share_np"] = df["share_np"].fillna(0.0)
     df["norgespris_count"] = df["norgespris_count"].fillna(0)
     df["total_count"] = df["total_count"].fillna(0)
+    df["eur_to_nok"] = df["eur_to_nok"].fillna(EUR_TO_NOK)  # Fallback to constant if merge fails
+
+    # Convert spot price to NOK/kWh using daily exchange rates
+    df["spot_nok_kwh"] = eur_mwh_to_nok_kwh(df["spot_eur_mwh"], df["eur_to_nok"])
 
     # 5) Proxy-volum splitt
     df["vol_np_kwh"] = df["volume_kwh"] * df["share_np"]
     df["vol_rest_kwh"] = df["volume_kwh"] * (1.0 - df["share_np"])
 
     # 6) Prisregler
-    # Norgespris: capped at 40 EUR/MWh (0.46 NOK/kWh)
-    df["price_np_nok_kwh"] = df["spot_nok_kwh"].clip(upper=NORGESPRIS_CAP_NOK_PER_KWH)
+    # Norgespris: capped at 40 EUR/MWh (0.46 NOK/kWh) - cap is also in NOK using daily rates
+    norgespris_cap_nok_per_kwh = (NORGESPRIS_CAP_EUR_PER_MWH / 1000.0) * df["eur_to_nok"]
+    df["price_np_nok_kwh"] = df["spot_nok_kwh"].clip(upper=norgespris_cap_nok_per_kwh)
 
     # Strømstøtte: 90% over 0.77 NOK/kWh
     df["support_nok_kwh"] = SUPPORT_RATE * (df["spot_nok_kwh"] - SUPPORT_THRESHOLD_NOK_PER_KWH).clip(lower=0.0)
@@ -308,13 +392,13 @@ def build_cost_proxy(inputs: Inputs) -> pd.DataFrame:
     # 8) State cost calculations (Norgespris is SYMMETRICAL)
     # Norgespris gain/loss: difference between spot and cap (can be negative = gain for state)
     # (spot - cap) * volume: positive = loss for state, negative = gain for state
-    df["np_gain_loss_nok"] = df["vol_np_kwh"] * (df["spot_nok_kwh"] - NORGESPRIS_CAP_NOK_PER_KWH)
+    df["np_gain_loss_nok"] = df["vol_np_kwh"] * (df["spot_nok_kwh"] - norgespris_cap_nok_per_kwh)
 
     # VAT loss on Norgespris: when spot > cap, state loses VAT on the difference
     # Lost VAT = (spot - cap) * volume * VAT_RATE (only when spot > cap)
     df["np_vat_loss_nok"] = (
         df["vol_np_kwh"] *
-        (df["spot_nok_kwh"] - NORGESPRIS_CAP_NOK_PER_KWH).clip(lower=0.0) *
+        (df["spot_nok_kwh"] - norgespris_cap_nok_per_kwh).clip(lower=0.0) *
         VAT_RATE
     )
 

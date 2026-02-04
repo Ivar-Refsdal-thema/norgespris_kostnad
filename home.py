@@ -23,36 +23,27 @@ BUDGET_NOK = 11e9
 
 # Sidebar filters
 st.sidebar.header("Innstillinger")
-start_date = st.sidebar.date_input("Startdato", value=pd.to_datetime("2025-12-01").date())
-selected_zones = st.sidebar.multiselect(
-    "Prisområder",
-    options=PRICE_AREAS,
-    default=PRICE_AREAS,
-    help="Velg ett eller flere prisområder"
+start_date_option = st.sidebar.radio(
+    "Startdato",
+    options=["1. oktober 2025", "1. desember 2025"],
+    index=1
 )
+start_date = pd.to_datetime("2025-10-01").date() if start_date_option == "1. oktober 2025" else pd.to_datetime("2025-12-01").date()
+selected_zones = PRICE_AREAS  # Use all zones automatically
 
 if st.sidebar.button("Last data", type="primary"):
-    if not selected_zones:
-        st.warning("Velg minst ett prisområde")
+    start_str = str(start_date) + " 00:00:00"
+    end_str = pd.Timestamp.now(tz="Europe/Oslo").date().isoformat() + " 23:00:00"
+
+    with st.spinner("Henter data fra Elhub og entsoe..."):
+        df = fetch_data_cached(start_str, end_str)
+
+    if df.empty:
+        st.warning("Ingen data returnert. Sjekk entsoe-tilkobling.")
     else:
-        start_str = str(start_date) + " 00:00:00"
-        end_str = pd.Timestamp.now(tz="Europe/Oslo").date().isoformat() + " 23:00:00"
-
-        with st.spinner("Henter data fra Elhub og entsoe..."):
-            df = fetch_data_cached(start_str, end_str)
-
-        if df.empty:
-            st.warning("Ingen data returnert. Sjekk entsoe-tilkobling.")
-        else:
-            # Filter by selected zones
-            df = df[df["price_area"].isin(selected_zones)].copy()
-
-            if df.empty:
-                st.warning("Ingen data for valgte prisområder.")
-            else:
-                # Store in session state for persistence
-                st.session_state["df"] = df
-                st.session_state["selected_zones"] = selected_zones
+        # Store in session state for persistence
+        st.session_state["df"] = df
+        st.session_state["selected_zones"] = selected_zones
 
 # Check if we have data in session state
 if "df" in st.session_state:
