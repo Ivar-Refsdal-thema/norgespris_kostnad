@@ -140,7 +140,8 @@ if "df" in st.session_state:
 
         # Breakdown by price area
         st.subheader("Norgespris-andel per prisområde")
-        area_share = df.groupby(["date", "price_area"], as_index=False).agg(
+        area_share = df.drop_duplicates(subset=["date", "price_area", "cons_group"], keep="last")
+        area_share = area_share.groupby(["date", "price_area"], as_index=False).agg(
             norgespris_count=("norgespris_count", "sum"),
             total_count=("total_count", "sum"),
         )
