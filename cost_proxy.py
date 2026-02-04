@@ -1,16 +1,36 @@
 from __future__ import annotations
 
+from operator import ge
 import os
 from dataclasses import dataclass
 from datetime import date
 from urllib.parse import urlencode
 
+from arrow import get
 import pandas as pd
 import requests
 from entsoe import EntsoePandasClient
-from dotenv import load_dotenv
 
-load_dotenv()
+import streamlit as st
+
+# Optional for local dev only
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
+
+def get_secret(name: str) -> str:
+    # Prefer Streamlit secrets in cloud
+    if name in st.secrets:
+        return st.secrets[name]
+    # Fall back to environment variables (incl. .env locally)
+    val = os.getenv(name)
+    if not val:
+        raise RuntimeError(f"Missing secret: {name}")
+    return val
+
 
 # -----------------------------
 # Konfig
@@ -51,7 +71,7 @@ class Inputs:
 # -----------------------------
 def _get_entsoe_client() -> EntsoePandasClient:
     """Get ENTSO-E Pandas client using API key from environment."""
-    api_key = os.environ.get("ENTSOE_KEY")
+    api_key = get_secret("ENTSOE_KEY")
     if not api_key:
         raise ValueError("ENTSOE_KEY not found in environment variables")
     return EntsoePandasClient(api_key=api_key)
