@@ -1,11 +1,8 @@
 # norgespris-surveillance
 
 
-## To run this dashboard you need an .env file with the Databricks endpoints
-DATABRICKS_HOST=
-
-DATABRICKS_HTTP_PATH=
-
+## To run this dashboard you need an .env file with an entsoe api key
+ENTSOE_KEY=
 
 
 ## 🧑‍💻 For Developers: Environment & Dependency Management
