@@ -92,7 +92,7 @@ if "df" in st.session_state:
 
     with tab1:
         st.subheader("Daglig kostnad for staten")
-        st.caption("Inkluderer Norgespris (kan være negativ ved lav pris), strømstøtte og tapt MVA. Antar at Norgespris-kunder har samme forbruk som snittet av fobrukere innad i et budområde.")
+        st.caption("Inkluderer Norgespris (kan være negativ ved lav pris), strømstøtte og tapt MVA. Antar at Norgespris-kunder har samme forbruk som snittet av forbrukere innad i et budområde.")
 
         chart_data = daily.set_index("date")[[
             "np_gain_loss_nok", "support_nok", "np_vat_loss_nok", "support_vat_loss_nok"
